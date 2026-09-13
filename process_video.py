@@ -1,10 +1,14 @@
 import cv2
-import subprocess
 import os
-import sys
+import subprocess
 from ultralytics import YOLO
 
+INPUT_DIR = "input"
+OUTPUT_DIR = "output"
+
 SAMPLE_FPS = 2
+REFINE_FPS = 4
+
 CONFIDENCE = 0.35
 PADDING = 0.5
 GAP_LIMIT = 0.75
@@ -23,10 +27,6 @@ TARGET_CLASSES = {
     23: "giraffe"
 }
 
-INPUT_DIR = "input"
-OUTPUT_DIR = "output"
-
-os.makedirs(INPUT_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 videos = [
@@ -34,163 +34,315 @@ videos = [
     if f.lower().endswith((".mp4", ".mov", ".avi", ".mkv"))
 ]
 
-if not videos:
-    print("No videos found in input folder.")
-    sys.exit()
+if len(videos) == 0:
+    print("No video found in input folder.")
+    exit()
 
 if len(videos) > 1:
-    print("Multiple videos found.")
-    print("For now, keep only one video in the input folder.")
-    sys.exit()
+    print("Multiple videos found. Please keep only one video in input folder.")
+    exit()
 
 input_video = os.path.join(INPUT_DIR, videos[0])
 
-filename = os.path.splitext(os.path.basename(input_video))[0]
-
+base_name = os.path.splitext(videos[0])[0]
 output_video = os.path.join(
     OUTPUT_DIR,
-    f"{filename}_cleaned.mp4"
+    f"{base_name}_cleaned.mp4"
 )
 
 print(f"Input: {input_video}")
 print(f"Output: {output_video}")
-print()
 
 model = YOLO("yolo11n.pt")
 
 cap = cv2.VideoCapture(input_video)
 
 fps = cap.get(cv2.CAP_PROP_FPS)
-total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-duration = total_frames / fps
-
-frame_step = max(1, round(fps / SAMPLE_FPS))
-
-detections = []
-frame_number = 0
-checked = 0
+frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+duration = frame_count / fps
 
 print(f"Duration: {duration:.2f} seconds")
 print(f"FPS: {fps}")
-print(f"Sampling: {SAMPLE_FPS} FPS")
-print()
+print(f"Coarse sampling: {SAMPLE_FPS} FPS")
+print(f"Refinement sampling: {REFINE_FPS} FPS")
 
-while True:
+coarse_detections = []
+
+step = 1 / SAMPLE_FPS
+t = 0
+
+while t < duration:
+
+    cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
 
     ret, frame = cap.read()
 
     if not ret:
-        break
+        t += step
+        continue
 
-    if frame_number % frame_step == 0:
+    results = model(
+        frame,
+        device="cpu",
+        conf=CONFIDENCE,
+        classes=list(TARGET_CLASSES.keys()),
+        verbose=False
+    )
 
-        result = model(
-            frame,
-            device="cpu",
-            classes=list(TARGET_CLASSES.keys()),
-            conf=CONFIDENCE,
-            verbose=False
-        )[0]
+    found = []
 
-        detected = False
+    for result in results:
 
-        for box in result.boxes:
+        if result.boxes is not None:
 
-            class_id = int(box.cls[0])
+            for cls in result.boxes.cls:
 
-            if class_id in TARGET_CLASSES:
-                detected = True
-                break
+                class_id = int(cls)
+                found.append(TARGET_CLASSES[class_id])
 
-        checked += 1
+    if found:
 
-        if detected:
+        coarse_detections.append(t)
 
-            timestamp = frame_number / fps
-            detections.append(timestamp)
+        print(
+            f"{t:.2f}s -> "
+            f"{', '.join(found)}"
+        )
 
-            print(f"Detected at {timestamp:.2f}s")
-
-    frame_number += 1
+    t += step
 
 cap.release()
 
 print()
-print(f"Frames checked: {checked}")
-print(f"Detection points: {len(detections)}")
+print(f"Coarse frames checked: {int(duration * SAMPLE_FPS)}")
+print(
+    f"Coarse detection points: "
+    f"{len(coarse_detections)}"
+)
 
-if not detections:
+if not coarse_detections:
+
+    print()
+    print("No living things detected.")
+    print("Keeping entire video.")
 
     keep_intervals = [(0, duration)]
 
 else:
 
-    intervals = []
+    detection_ranges = []
 
-    start = detections[0]
-    previous = detections[0]
+    start = coarse_detections[0]
+    end = coarse_detections[0]
 
-    for timestamp in detections[1:]:
+    for t in coarse_detections[1:]:
 
-        if timestamp - previous <= GAP_LIMIT:
+        if t - end <= GAP_LIMIT:
 
-            previous = timestamp
+            end = t
 
         else:
 
-            intervals.append((start, previous))
+            detection_ranges.append(
+                (start, end)
+            )
 
-            start = timestamp
-            previous = timestamp
+            start = t
+            end = t
 
-    intervals.append((start, previous))
+    detection_ranges.append((start, end))
 
-    removal_intervals = []
+    refine_ranges = []
 
-    for start, end in intervals:
+    for start, end in detection_ranges:
 
-        start = max(0, start - PADDING)
-        end = min(duration, end + PADDING)
+        start = max(0, start - 1.0)
+        end = min(duration, end + 1.0)
 
-        if removal_intervals and start <= removal_intervals[-1][1]:
+        if not refine_ranges:
 
-            removal_intervals[-1] = (
-                removal_intervals[-1][0],
-                max(removal_intervals[-1][1], end)
+            refine_ranges.append(
+                [start, end]
+            )
+
+        elif start <= refine_ranges[-1][1]:
+
+            refine_ranges[-1][1] = max(
+                refine_ranges[-1][1],
+                end
             )
 
         else:
 
-            removal_intervals.append((start, end))
+            refine_ranges.append(
+                [start, end]
+            )
+
+    refined_detections = []
+
+    cap = cv2.VideoCapture(input_video)
+
+    refine_step = 1 / REFINE_FPS
+
+    for start, end in refine_ranges:
+
+        print()
+        print(
+            f"Refining: "
+            f"{start:.2f}s -> {end:.2f}s"
+        )
+
+        t = start
+
+        while t <= end:
+
+            cap.set(
+                cv2.CAP_PROP_POS_MSEC,
+                t * 1000
+            )
+
+            ret, frame = cap.read()
+
+            if not ret:
+
+                t += refine_step
+                continue
+
+            results = model(
+                frame,
+                device="cpu",
+                conf=CONFIDENCE,
+                classes=list(TARGET_CLASSES.keys()),
+                verbose=False
+            )
+
+            found = False
+
+            for result in results:
+
+                if (
+                    result.boxes is not None
+                    and len(result.boxes) > 0
+                ):
+
+                    found = True
+                    break
+
+            if found:
+
+                refined_detections.append(t)
+
+            t += refine_step
+
+    cap.release()
+
+    all_detections = sorted(
+        set(
+            coarse_detections
+            + refined_detections
+        )
+    )
+
+    detection_ranges = []
+
+    start = all_detections[0]
+    end = all_detections[0]
+
+    for t in all_detections[1:]:
+
+        if t - end <= GAP_LIMIT:
+
+            end = t
+
+        else:
+
+            detection_ranges.append(
+                (start, end)
+            )
+
+            start = t
+            end = t
+
+    detection_ranges.append(
+        (start, end)
+    )
+
+    remove_intervals = []
+
+    for start, end in detection_ranges:
+
+        start = max(
+            0,
+            start - PADDING
+        )
+
+        end = min(
+            duration,
+            end + PADDING
+        )
+
+        remove_intervals.append(
+            [start, end]
+        )
+
+    merged = []
+
+    for start, end in remove_intervals:
+
+        if (
+            not merged
+            or start > merged[-1][1]
+        ):
+
+            merged.append(
+                [start, end]
+            )
+
+        else:
+
+            merged[-1][1] = max(
+                merged[-1][1],
+                end
+            )
+
+    remove_intervals = merged
 
     keep_intervals = []
 
     current = 0
 
-    for start, end in removal_intervals:
+    for start, end in remove_intervals:
 
         if current < start:
-            keep_intervals.append((current, start))
+
+            keep_intervals.append(
+                (current, start)
+            )
 
         current = end
 
     if current < duration:
-        keep_intervals.append((current, duration))
+
+        keep_intervals.append(
+            (current, duration)
+        )
 
 print()
 print("KEEP INTERVALS")
+print("==============")
 
 for start, end in keep_intervals:
 
-    print(f"{start:.2f}s -> {end:.2f}s")
+    print(
+        f"KEEP: "
+        f"{start:.2f}s -> {end:.2f}s"
+    )
 
 if not keep_intervals:
 
-    print("No usable video remains.")
-    sys.exit()
-
-print()
-print("Creating final video...")
+    print()
+    print("Nothing remains after removing detected sections.")
+    exit()
 
 filters = []
 
@@ -201,14 +353,13 @@ for i, (start, end) in enumerate(keep_intervals):
         f"setpts=PTS-STARTPTS[v{i}]"
     )
 
-concat_inputs = "".join(
-    f"[v{i}]"
-    for i in range(len(keep_intervals))
+inputs = "".join(
+    f"[v{i}]" for i in range(len(keep_intervals))
 )
 
 filters.append(
-    f"{concat_inputs}"
-    f"concat=n={len(keep_intervals)}:v=1:a=0[outv]"
+    f"{inputs}concat=n={len(keep_intervals)}:"
+    f"v=1:a=0[outv]"
 )
 
 filter_complex = ";".join(filters)
@@ -232,10 +383,24 @@ command = [
     output_video
 ]
 
-subprocess.run(command, check=True)
-
 print()
-print("================================")
-print("DONE!")
-print("================================")
-print(f"Output: {output_video}")
+print("Creating cleaned video...")
+
+subprocess.run(command)
+
+if os.path.exists(output_video):
+
+    size_mb = (
+        os.path.getsize(output_video)
+        / (1024 * 1024)
+    )
+
+    print()
+    print("DONE!")
+    print(f"Output: {output_video}")
+    print(f"Size: {size_mb:.2f} MB")
+
+else:
+
+    print()
+    print("ERROR: Output video was not created.")
