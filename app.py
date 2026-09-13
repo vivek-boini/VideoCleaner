@@ -7,7 +7,6 @@ sys.path.append("src")
 
 from processor import process_video
 
-
 INPUT_DIR = "temp"
 OUTPUT_DIR = "output"
 
@@ -26,7 +25,6 @@ st.set_page_config(
     layout="centered"
 )
 
-
 st.title("🎬 Video Cleaner")
 st.caption(
     "Remove audio and automatically remove sections containing "
@@ -35,7 +33,6 @@ st.caption(
 
 st.divider()
 
-
 uploaded_files = st.file_uploader(
     "📤 Upload your videos",
     type=["mp4", "mov", "avi", "mkv"],
@@ -43,17 +40,13 @@ uploaded_files = st.file_uploader(
     help="You can select multiple videos for batch processing."
 )
 
-
 if uploaded_files:
 
     st.subheader("📋 Selected Videos")
 
     for file in uploaded_files:
         file_size = file.size / (1024 * 1024)
-
-        st.write(
-            f"🎥 **{file.name}** — {file_size:.1f} MB"
-        )
+        st.write(f"🎥 **{file.name}** — {file_size:.1f} MB")
 
     st.divider()
 
@@ -69,18 +62,14 @@ if uploaded_files:
 
         for index, file in enumerate(uploaded_files, 1):
 
-            st.write(
-                f"### {index}. {file.name}"
-            )
+            st.write(f"### {index}. {file.name}")
 
             input_path = os.path.join(
                 INPUT_DIR,
                 file.name
             )
 
-            base_name = os.path.splitext(
-                file.name
-            )[0]
+            base_name = os.path.splitext(file.name)[0]
 
             output_path = os.path.join(
                 OUTPUT_DIR,
@@ -94,29 +83,25 @@ if uploaded_files:
 
             status = st.empty()
 
-            status.info(
-                "🔍 Detecting people and animals..."
-            )
-
-            progress.progress(30)
+            def update_ui(percent, message):
+                progress.progress(percent)
+                status.info(message)
 
             try:
 
                 success, duration = process_video(
                     input_path,
                     output_path,
-                    model
+                    model,
+                    update_ui
                 )
-
-                progress.progress(90)
 
                 if success and os.path.exists(output_path):
 
                     progress.progress(100)
 
                     status.success(
-                        f"✅ Completed — original duration "
-                        f"{duration:.1f}s"
+                        f"✅ Completed — original duration {duration:.1f}s"
                     )
 
                     st.video(output_path)
@@ -127,9 +112,7 @@ if uploaded_files:
                     st.download_button(
                         "⬇️ Download Cleaned Video",
                         data=video_data,
-                        file_name=os.path.basename(
-                            output_path
-                        ),
+                        file_name=os.path.basename(output_path),
                         mime="video/mp4",
                         use_container_width=True,
                         key=f"download_{index}"
@@ -152,7 +135,6 @@ if uploaded_files:
                 )
 
             st.divider()
-
 
 else:
 

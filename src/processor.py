@@ -51,12 +51,20 @@ def merge_intervals(intervals, max_gap=0):
     return merged
 
 
-def detect_living_things(video_path, model):
+def detect_living_things(
+    video_path,
+    model,
+    progress_callback=None
+):
     cap = cv2.VideoCapture(video_path)
 
     fps = cap.get(cv2.CAP_PROP_FPS)
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = frame_count / fps
+
+    def update_progress(percent, message):
+        if progress_callback:
+            progress_callback(percent, message)
 
     coarse_detections = []
 
@@ -64,6 +72,14 @@ def detect_living_things(video_path, model):
     t = 0
 
     while t < duration:
+
+        progress = int((t / duration) * 35)
+
+        update_progress(
+            progress,
+            "🔍 Detecting living things..."
+        )
+
         cap.set(
             cv2.CAP_PROP_POS_MSEC,
             t * 1000
@@ -102,7 +118,17 @@ def detect_living_things(video_path, model):
 
     cap.release()
 
+    update_progress(
+        35,
+        "🔍 Coarse detection completed..."
+    )
+
     if not coarse_detections:
+        update_progress(
+            75,
+            "🎬 Preparing cleaned video..."
+        )
+
         return [(0, duration)], duration
 
     detection_ranges = []
@@ -111,8 +137,10 @@ def detect_living_things(video_path, model):
     end = coarse_detections[0]
 
     for t in coarse_detections[1:]:
+
         if t - end <= GAP_LIMIT:
             end = t
+
         else:
             detection_ranges.append(
                 (start, end)
@@ -128,6 +156,7 @@ def detect_living_things(video_path, model):
     refine_ranges = []
 
     for start, end in detection_ranges:
+
         start = max(
             0,
             start - 1.0
@@ -152,10 +181,23 @@ def detect_living_things(video_path, model):
 
     refine_step = 1 / REFINE_FPS
 
-    for start, end in refine_ranges:
+    for range_index, (start, end) in enumerate(
+        refine_ranges
+    ):
+
+        progress = 35 + int(
+            (range_index / max(len(refine_ranges), 1)) * 40
+        )
+
+        update_progress(
+            progress,
+            "🔍 Refining detected sections..."
+        )
+
         t = start
 
         while t <= end:
+
             cap.set(
                 cv2.CAP_PROP_POS_MSEC,
                 t * 1000
@@ -178,6 +220,7 @@ def detect_living_things(video_path, model):
             found = False
 
             for result in results:
+
                 if (
                     result.boxes is not None
                     and len(result.boxes) > 0
@@ -192,6 +235,11 @@ def detect_living_things(video_path, model):
 
     cap.release()
 
+    update_progress(
+        75,
+        "🎬 Preparing cleaned video..."
+    )
+
     all_detections = sorted(
         set(
             coarse_detections
@@ -205,8 +253,10 @@ def detect_living_things(video_path, model):
     end = all_detections[0]
 
     for t in all_detections[1:]:
+
         if t - end <= GAP_LIMIT:
             end = t
+
         else:
             detection_ranges.append(
                 (start, end)
@@ -222,6 +272,7 @@ def detect_living_things(video_path, model):
     remove_intervals = []
 
     for start, end in detection_ranges:
+
         start = max(
             0,
             start - PADDING
@@ -243,10 +294,13 @@ def detect_living_things(video_path, model):
     smoothed_remove_intervals = []
 
     for start, end in remove_intervals:
+
         if not smoothed_remove_intervals:
+
             smoothed_remove_intervals.append(
                 [start, end]
             )
+
             continue
 
         previous_start, previous_end = (
@@ -256,8 +310,11 @@ def detect_living_things(video_path, model):
         gap = start - previous_end
 
         if gap <= SMOOTH_GAP:
+
             smoothed_remove_intervals[-1][1] = end
+
         else:
+
             smoothed_remove_intervals.append(
                 [start, end]
             )
@@ -273,7 +330,9 @@ def detect_living_things(video_path, model):
     current = 0
 
     for start, end in remove_intervals:
+
         if current < start:
+
             keep_intervals.append(
                 (current, start)
             )
@@ -281,19 +340,27 @@ def detect_living_things(video_path, model):
         current = end
 
     if current < duration:
+
         keep_intervals.append(
             (current, duration)
         )
 
     final_keep_intervals = []
-    final_remove_intervals = list(remove_intervals)
+
+    final_remove_intervals = list(
+        remove_intervals
+    )
 
     for start, end in keep_intervals:
+
         if end - start < MIN_KEEP_DURATION:
+
             final_remove_intervals.append(
                 [start, end]
             )
+
         else:
+
             final_keep_intervals.append(
                 (start, end)
             )
@@ -307,7 +374,9 @@ def detect_living_things(video_path, model):
     current = 0
 
     for start, end in final_remove_intervals:
+
         if current < start:
+
             keep_intervals.append(
                 (current, start)
             )
@@ -315,6 +384,7 @@ def detect_living_things(video_path, model):
         current = end
 
     if current < duration:
+
         keep_intervals.append(
             (current, duration)
         )
@@ -335,6 +405,7 @@ def create_cleaned_video(
     for i, (start, end) in enumerate(
         keep_intervals
     ):
+
         filters.append(
             f"[0:v]trim=start={start}:end={end},"
             f"setpts=PTS-STARTPTS[v{i}]"
@@ -381,10 +452,30 @@ def create_cleaned_video(
     return result.returncode == 0
 
 
-def process_video(input_video, output_video, model):
+def process_video(
+    input_video,
+    output_video,
+    model,
+    progress_callback=None
+):
+    def update_progress(percent, message):
+        if progress_callback:
+            progress_callback(percent, message)
+
+    update_progress(
+        0,
+        "🔍 Starting detection..."
+    )
+
     keep_intervals, duration = detect_living_things(
         input_video,
-        model
+        model,
+        progress_callback
+    )
+
+    update_progress(
+        75,
+        "🎬 Creating cleaned video..."
     )
 
     success = create_cleaned_video(
@@ -392,5 +483,12 @@ def process_video(input_video, output_video, model):
         output_video,
         keep_intervals
     )
+
+    if success:
+
+        update_progress(
+            100,
+            "✅ Cleaning completed!"
+        )
 
     return success, duration
